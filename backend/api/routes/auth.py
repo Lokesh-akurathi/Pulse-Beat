@@ -81,15 +81,10 @@ def register(request: RegisterRequest):
     if role not in ["user", "artist"]:
         raise HTTPException(status_code=400, detail="Invalid role. Must be 'user' or 'artist'")
         
-    # Check if email already exists
-    existing_user = repo.get_user_by_email(request.email)
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-        
     # Hash password using bcrypt
     hashed_password = bcrypt.hashpw(request.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     
-    # Create user in db
+    # Create user in db (handles duplicate email check internally)
     result = repo.create_user(
         name=request.name.strip(),
         email=request.email.strip(),
@@ -99,7 +94,11 @@ def register(request: RegisterRequest):
     )
     
     if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Failed to create user"))
+        err = result.get("error", "Failed to create user - user mail already exist")
+        if "timed out" in err.lower() or "timeout" in err.lower():
+            raise HTTPException(status_code=504, detail="Request timed out. Please try again.")
+        status_code = 400 if "already" in err.lower() or "email" in err.lower() else 500
+        raise HTTPException(status_code=status_code, detail=err)
         
     return RegisterResponse(
         message="User registered successfully",

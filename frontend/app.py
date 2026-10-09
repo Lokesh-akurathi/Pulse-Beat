@@ -10,6 +10,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "15"))
 DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 
 
@@ -27,29 +28,39 @@ def _require_user_id():
     return user_id
 
 
-def _safe_get(path: str, params: Optional[dict] = None, fallback=None):
+def _safe_get(path: str, params: Optional[dict] = None, fallback=None, timeout: int = API_TIMEOUT):
     headers = {}
     if "access_token" in session:
         headers["Authorization"] = f"Bearer {session['access_token']}"
     try:
-        response = requests.get(f"{API_BASE_URL}{path}", params=params, headers=headers, timeout=4)
+        response = requests.get(f"{API_BASE_URL}{path}", params=params, headers=headers, timeout=timeout)
         if response.ok:
             return response.json()
     except requests.RequestException:
         pass
     return fallback
 
-def _safe_post(path: str, json_data: Optional[dict] = None, fallback=None):
+def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT):
+    """
+    Execute a POST request against the backend API.
+    Returns: (data, error_message)
+    """
     headers = {}
     if "access_token" in session:
         headers["Authorization"] = f"Bearer {session['access_token']}"
     try:
-        response = requests.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=4)
+        response = requests.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=timeout)
         if response.ok:
-            return response.json()
+            return response.json(), None
+        try:
+            detail = response.json().get("detail", "Request failed")
+        except Exception:
+            detail = "Request failed"
+        return None, detail
+    except requests.Timeout:
+        return None, "Request timed out. Please try again."
     except requests.RequestException:
-        pass
-    return fallback
+        return None, "Unable to connect to the backend authentication service"
 
 
 @app.route("/")
@@ -118,13 +129,11 @@ def login():
         password = request.form.get("password", "").strip()
         
         # Authenticate via FastAPI backend
-        auth_response = _safe_post("/api/auth/login", json_data={"email": email, "password": password})
-        
+        auth_response, error = _safe_post("/api/auth/login", json_data={"email": email, "password": password})
         if auth_response and "access_token" in auth_response:
             session["user_id"] = auth_response["user_id"]
             session["access_token"] = auth_response["access_token"]
             return redirect(url_for("home"))
-        error = "Invalid email or password"
 
     return render_template("login.html", error=error, success=success)
 
@@ -145,28 +154,18 @@ def register():
         if not name or not email or not password or not role:
             error = "All fields are required"
         else:
-            try:
-                response = requests.post(
-                    f"{API_BASE_URL}/api/auth/register",
-                    json={
-                        "name": name,
-                        "email": email,
-                        "password": password,
-                        "role": role,
-                        "nationality": nationality if role == "artist" else "Unknown"
-                    },
-                    timeout=4
-                )
-                if response.status_code == 200:
-                    return redirect(url_for("login", registered="success"))
-                else:
-                    try:
-                        detail = response.json().get("detail", "Registration failed")
-                    except Exception:
-                        detail = "Registration failed"
-                    error = detail
-            except requests.RequestException:
-                error = "Unable to connect to the backend authentication service"
+            reg_response, error = _safe_post(
+                "/api/auth/register",
+                json_data={
+                    "name": name,
+                    "email": email,
+                    "password": password,
+                    "role": role,
+                    "nationality": nationality if role == "artist" else "Unknown"
+                }
+            )
+            if reg_response:
+                return redirect(url_for("login", registered="success"))
 
     return render_template("register.html", error=error)
 
