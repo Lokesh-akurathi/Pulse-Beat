@@ -67,11 +67,7 @@ def get_user_by_email(email: str):
     )
 
 def get_user_profile(user_id: int):
-    # First, check and update subscription status if expired
-    _call_procedure("check_and_update_subscription", (user_id,))
-    
-    # Then fetch the updated user profile
-    return _fetch_one_dict(
+    user = _fetch_one_dict(
         """
         SELECT user_id, name, email_id, user_role, wallet_balance, subscription_type, 
                DATE_FORMAT(subscription_start, '%Y-%m-%d') as subscription_start,
@@ -81,6 +77,25 @@ def get_user_profile(user_id: int):
         """,
         (user_id,),
     )
+    if not user:
+        return None
+
+    # Check and update subscription status only if non-free subscription has expired - this elimiate one more reound trip to db, be checking status from data in ram and make call only if upfdate needed.
+    sub_type = user.get("subscription_type")
+    sub_end = user.get("subscription_end")
+    if user.get("user_role") != "artist" and sub_type and sub_type != "free" and sub_end:
+        from datetime import datetime, date
+
+        try:
+            if datetime.strptime(sub_end, "%Y-%m-%d").date() < date.today():
+                _call_procedure("check_and_update_subscription", (user_id,))
+                user["subscription_type"] = "free"
+                user["subscription_start"] = None
+                user["subscription_end"] = None
+        except Exception:
+            pass
+
+    return user
 
 
 def is_premium_and_subscribed(user_id: int) -> bool:

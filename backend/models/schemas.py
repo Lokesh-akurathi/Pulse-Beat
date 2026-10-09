@@ -122,15 +122,15 @@ class CancelSubscriptionRequest(BaseModel):
 
 class HomeResponse(BaseModel):
     profile: UserProfile
-    trending_songs: List[SongCard]
-    recommendations: List[SongCard]
-    playlists: List[PlaylistCard]
-    song_sales: List[SongCard]
-    liked_songs: List[SongCard]
-    followed_artists: List[ArtistCard]
+    trending_songs: List[SongCard] = []
+    recommendations: List[SongCard] = []
+    playlists: List[PlaylistCard] = []
+    song_sales: List[SongCard] = []
+    liked_songs: List[SongCard] = []
+    followed_artists: List[ArtistCard] = []
     all_artists: List[ArtistCard] = []
-    genres: List[GenreCard]
-    recent_songs: List[SongCard]
+    genres: List[GenreCard] = []
+    recent_songs: List[SongCard] = []
 
 
 class SearchResponse(BaseModel):

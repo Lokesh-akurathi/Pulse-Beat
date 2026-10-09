@@ -1,21 +1,29 @@
+from concurrent.futures import ThreadPoolExecutor
 from backend.db import repositories as repo
 
 
 def get_home_payload(user_id: int):
-    profile = repo.get_user_profile(user_id)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        f_profile = executor.submit(repo.get_user_profile, user_id)
+        f_trending = executor.submit(repo.get_trending_songs)
+        f_artists = executor.submit(repo.get_all_artists, 12)
+        f_recent = executor.submit(repo.get_recent_songs, user_id)
+
+    profile = f_profile.result()
     if not profile:
         raise ValueError("User not found")
+
     return {
         "profile": profile,
-        "trending_songs": repo.get_trending_songs(),
-        "recommendations": repo.get_recommendations(user_id),
-        "playlists": repo.get_user_playlists(user_id),
-        "song_sales": repo.get_user_song_sales(user_id),
-        "liked_songs": repo.get_user_liked_songs(user_id),
-        "followed_artists": repo.get_followed_artists(user_id),
-        "all_artists": repo.get_all_artists(12),
-        "genres": repo.get_genres(),
-        "recent_songs": repo.get_recent_songs(user_id),
+        "trending_songs": f_trending.result() or [],
+        "recommendations": [],
+        "playlists": [],
+        "song_sales": [],
+        "liked_songs": [],
+        "followed_artists": [],
+        "all_artists": f_artists.result() or [],
+        "genres": [],
+        "recent_songs": f_recent.result() or [],
     }
 
 
