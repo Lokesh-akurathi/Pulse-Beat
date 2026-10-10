@@ -1,17 +1,42 @@
+import asyncio
 import os
-import requests
 from typing import Optional
 from dotenv import load_dotenv
-from flask import Flask, redirect, render_template, request, session, url_for
+import httpx
+from quart import Quart, redirect, render_template, request, session, url_for
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Quart(
+    __name__,
+    template_folder="templates",
+    static_folder="static",
+)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 API_TIMEOUT = int(os.getenv("API_TIMEOUT", "15"))
 DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
+
+# Shared persistent asynchronous HTTP client for connection pooling and high throughput
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(API_TIMEOUT),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+        )
+    return _http_client
+
+
+@app.after_serving
+async def close_http_client():
+    global _http_client
+    if _http_client is not None and not _http_client.is_closed:
+        await _http_client.aclose()
 
 
 def _get_logged_in_user_id():
@@ -28,56 +53,57 @@ def _require_user_id():
     return user_id
 
 
-def _safe_get(path: str, params: Optional[dict] = None, fallback=None, timeout: int = API_TIMEOUT):
+async def _safe_get(path: str, params: Optional[dict] = None, fallback=None, timeout: int = API_TIMEOUT):
+    client = get_http_client()
     headers = {}
     if "access_token" in session:
         headers["Authorization"] = f"Bearer {session['access_token']}"
     try:
-        response = requests.get(f"{API_BASE_URL}{path}", params=params, headers=headers, timeout=timeout)
-        if response.ok:
+        response = await client.get(f"{API_BASE_URL}{path}", params=params, headers=headers, timeout=timeout)
+        if response.is_success:
             return response.json()
-    except requests.RequestException:
+    except httpx.HTTPError:
         pass
     return fallback
 
-def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT):
+
+async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT):
     """
-    Execute a POST request against the backend API.
+    Execute an asynchronous POST request against the backend API.
     Returns: (data, error_message)
     """
+    client = get_http_client()
     headers = {}
     if "access_token" in session:
         headers["Authorization"] = f"Bearer {session['access_token']}"
     try:
-        response = requests.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=timeout)
-        if response.ok:
+        response = await client.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=timeout)
+        if response.is_success:
             return response.json(), None
         try:
             detail = response.json().get("detail", "Request failed")
         except Exception:
             detail = "Request failed"
         return None, detail
-    except requests.Timeout:
+    except httpx.TimeoutException:
         return None, "Request timed out. Please try again."
-    except requests.RequestException:
+    except httpx.HTTPError:
         return None, "Unable to connect to the backend authentication service"
 
 
 @app.route("/")
-def index():
+async def index():
     return redirect(url_for("login"))
 
 
 @app.route("/home")
-def home():
+async def home():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
     
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    profile.setdefault(
-        "user_id", user_id
-    )
+    profile = await _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
+    profile.setdefault("user_id", user_id)
     profile.setdefault("name", "Guest User")
     profile.setdefault("email_id", "guest@example.com")
     profile.setdefault("subscription_type", "free")
@@ -86,14 +112,14 @@ def home():
     
     # If user is an artist, fetch artist studio data
     if profile.get("user_role") == "artist":
-        data = _safe_get(f"/api/artist-studio/{user_id}", fallback={}) or {}
+        data = await _safe_get(f"/api/artist-studio/{user_id}", fallback={}) or {}
         data.setdefault("profile", profile)
         data.setdefault("recent_releases", [])
         data.setdefault("top_releases", [])
         data.setdefault("top_collaborators", [])
     else:
         # Regular user home
-        data = _safe_get("/api/home", params={"user_id": user_id}, fallback={}) or {}
+        data = await _safe_get("/api/home", params={"user_id": user_id}, fallback={}) or {}
         data.setdefault("profile", profile)
         data.setdefault("trending_songs", [])
         data.setdefault("recommendations", [])
@@ -105,7 +131,7 @@ def home():
         data.setdefault("genres", [])
         data.setdefault("recent_songs", [])
     
-    return render_template(
+    return await render_template(
         "index.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
@@ -115,7 +141,7 @@ def home():
 
 
 @app.route("/login", methods=["GET", "POST"])
-def login():
+async def login():
     if _get_logged_in_user_id() is not None:
         return redirect(url_for("home"))
 
@@ -125,36 +151,38 @@ def login():
         success = "Registration successful! Please log in with your new credentials."
 
     if request.method == "POST":
-        email = request.form.get("email", "").strip()
-        password = request.form.get("password", "").strip()
+        form = await request.form
+        email = form.get("email", "").strip()
+        password = form.get("password", "").strip()
         
-        # Authenticate via FastAPI backend
-        auth_response, error = _safe_post("/api/auth/login", json_data={"email": email, "password": password})
+        # Authenticate asynchronously via FastAPI backend
+        auth_response, error = await _safe_post("/api/auth/login", json_data={"email": email, "password": password})
         if auth_response and "access_token" in auth_response:
             session["user_id"] = auth_response["user_id"]
             session["access_token"] = auth_response["access_token"]
             return redirect(url_for("home"))
 
-    return render_template("login.html", error=error, success=success)
+    return await render_template("login.html", error=error, success=success)
 
 
 @app.route("/register", methods=["GET", "POST"])
-def register():
+async def register():
     if _get_logged_in_user_id() is not None:
         return redirect(url_for("home"))
 
     error = None
     if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        email = request.form.get("email", "").strip()
-        password = request.form.get("password", "").strip()
-        role = request.form.get("role", "").strip()
-        nationality = request.form.get("nationality", "").strip() or "Unknown"
+        form = await request.form
+        name = form.get("name", "").strip()
+        email = form.get("email", "").strip()
+        password = form.get("password", "").strip()
+        role = form.get("role", "").strip()
+        nationality = form.get("nationality", "").strip() or "Unknown"
 
         if not name or not email or not password or not role:
             error = "All fields are required"
         else:
-            reg_response, error = _safe_post(
+            reg_response, error = await _safe_post(
                 "/api/auth/register",
                 json_data={
                     "name": name,
@@ -167,17 +195,17 @@ def register():
             if reg_response:
                 return redirect(url_for("login", registered="success"))
 
-    return render_template("register.html", error=error)
+    return await render_template("register.html", error=error)
 
 
 @app.route("/logout")
-def logout():
+async def logout():
     session.clear()
     return redirect(url_for("login"))
 
 
 @app.route("/collection/<string:kind>")
-def collection_view(kind: str):
+async def collection_view(kind: str):
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
@@ -195,51 +223,56 @@ def collection_view(kind: str):
         api_path = "/api/likes"
         label = "Favourites"
     
-    songs = _safe_get(f"{api_path}/{user_id}", fallback=[]) or []
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    return render_template(
+    # Fetch songs and profile concurrently
+    songs, profile = await asyncio.gather(
+        _safe_get(f"{api_path}/{user_id}", fallback=[]),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+    )
+    return await render_template(
         "collection.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
-        profile=profile,
+        profile=profile or {},
         collection_title=label,
-        songs=songs,
+        songs=songs or [],
         kind=normalized,
     )
 
 
 @app.route("/followed-artists")
-def followed_artists_view():
+async def followed_artists_view():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    followed_artists = _safe_get(f"/api/followed-artists/{user_id}", fallback=[]) or []
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    return render_template(
+    followed_artists, profile = await asyncio.gather(
+        _safe_get(f"/api/followed-artists/{user_id}", fallback=[]),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+    )
+    return await render_template(
         "followed_artists.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
-        profile=profile,
-        artists=followed_artists,
+        profile=profile or {},
+        artists=followed_artists or [],
     )
 
 
 @app.route("/all-songs")
-def all_songs_view():
+async def all_songs_view():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
+    profile = await _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
     profile.setdefault("user_role", "user")
     
     if profile.get("user_role") == "artist":
         # Artists only see their own published songs
-        studio_data = _safe_get(f"/api/artist-studio/{user_id}", fallback={}) or {}
+        studio_data = await _safe_get(f"/api/artist-studio/{user_id}", fallback={}) or {}
         songs = studio_data.get("songs", [])
     else:
-        songs = _safe_get(f"/api/songs/all", fallback=[]) or []
+        songs = await _safe_get("/api/songs/all", fallback=[]) or []
     
-    return render_template(
+    return await render_template(
         "all_songs.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
@@ -249,36 +282,46 @@ def all_songs_view():
 
 
 @app.route("/playlists")
-def playlists_view():
+async def playlists_view():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    playlists = _safe_get(f"/api/playlists/{user_id}", fallback=[]) or []
     
-    for p in playlists:
-        playlist_data = _safe_get(f"/api/playlists/{p['playlist_id']}/songs", params={"user_id": user_id}, fallback={}) or {}
-        p["top_songs"] = playlist_data.get("songs", [])[:4]
+    profile, playlists = await asyncio.gather(
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+        _safe_get(f"/api/playlists/{user_id}", fallback=[]),
+    )
+    playlists = playlists or []
+    
+    if playlists:
+        # Fetch preview tracks for all playlists concurrently in parallel
+        tasks = [
+            _safe_get(f"/api/playlists/{p['playlist_id']}/songs", params={"user_id": user_id}, fallback={})
+            for p in playlists
+        ]
+        playlist_previews = await asyncio.gather(*tasks)
+        for p, preview in zip(playlists, playlist_previews):
+            p["top_songs"] = (preview or {}).get("songs", [])[:4]
 
-    return render_template(
+    return await render_template(
         "playlists.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
-        profile=profile,
+        profile=profile or {},
         playlists=playlists,
     )
 
 
 @app.route("/playlist/<int:playlist_id>")
-def playlist_view(playlist_id: int):
+async def playlist_view(playlist_id: int):
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    payload = _safe_get(
-        f"/api/playlists/{playlist_id}/songs",
-        params={"user_id": user_id},
-        fallback={},
-    ) or {}
+    payload, profile = await asyncio.gather(
+        _safe_get(f"/api/playlists/{playlist_id}/songs", params={"user_id": user_id}, fallback={}),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+    )
+    payload = payload or {}
     playlist = payload.get(
         "playlist",
         {
@@ -289,23 +332,27 @@ def playlist_view(playlist_id: int):
         },
     )
     songs = payload.get("songs", [])
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    return render_template(
+    return await render_template(
         "playlist.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
-        profile=profile,
+        profile=profile or {},
         playlist=playlist,
         songs=songs,
     )
 
 
 @app.route("/artist/<int:artist_id>")
-def artist_view(artist_id: int):
+async def artist_view(artist_id: int):
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    payload = _safe_get(f"/api/artists/{artist_id}", fallback={}) or {}
+    payload, profile, followed_artists = await asyncio.gather(
+        _safe_get(f"/api/artists/{artist_id}", fallback={}),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+        _safe_get(f"/api/followed-artists/{user_id}", fallback=[]),
+    )
+    payload = payload or {}
     artist = payload.get(
         "artist",
         {
@@ -317,14 +364,13 @@ def artist_view(artist_id: int):
         },
     )
     songs = payload.get("songs", [])
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    followed_artists = _safe_get(f"/api/followed-artists/{user_id}", fallback=[]) or []
+    followed_artists = followed_artists or []
     is_following = any(a.get("artist_id") == artist_id for a in followed_artists)
-    return render_template(
+    return await render_template(
         "artist.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
-        profile=profile,
+        profile=profile or {},
         artist=artist,
         songs=songs,
         is_following=is_following,
@@ -332,55 +378,52 @@ def artist_view(artist_id: int):
 
 
 @app.route("/genres")
-def genres_view():
+async def genres_view():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
     
-    # Fetch all genres
-    genres = _safe_get(f"/api/genres", fallback=[]) or []
+    genres, profile = await asyncio.gather(
+        _safe_get("/api/genres", fallback=[]),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+    )
     
-    # Fetch user profile
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    
-    return render_template(
+    return await render_template(
         "genres.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
-        profile=profile,
-        genres=genres,
+        profile=profile or {},
+        genres=genres or [],
     )
 
 
 @app.route("/genre/<int:genre_id>")
-def genre_view(genre_id: int):
+async def genre_view(genre_id: int):
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
     
-    # Fetch all genres to find the name for this genre_id
-    all_genres = _safe_get(f"/api/genres", fallback=[]) or []
+    all_genres, profile = await asyncio.gather(
+        _safe_get("/api/genres", fallback=[]),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+    )
+    all_genres = all_genres or []
+    profile = profile or {}
     genre = next((g for g in all_genres if g.get("genre_id") == genre_id), 
                  {"genre_id": genre_id, "genre_name": "Genre"})
     
-    # Fetch user profile first (needed for artist-filtered genre songs)
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
     profile.setdefault("user_role", "user")
 
-    # Fetch songs for this genre (artists only see their own and collaboration tracks)
     if profile.get("user_role") == "artist":
-        songs = (
-            _safe_get(
-                f"/api/genres/{genre_id}/songs",
-                params={"user_id": user_id},
-                fallback=[],
-            )
-            or []
-        )
+        songs = await _safe_get(
+            f"/api/genres/{genre_id}/songs",
+            params={"user_id": user_id},
+            fallback=[],
+        ) or []
     else:
-        songs = _safe_get(f"/api/genres/{genre_id}/songs", fallback=[]) or []
+        songs = await _safe_get(f"/api/genres/{genre_id}/songs", fallback=[]) or []
     
-    return render_template(
+    return await render_template(
         "genre.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
@@ -391,12 +434,15 @@ def genre_view(genre_id: int):
 
 
 @app.route("/artist-studio")
-def artist_studio_view():
+async def artist_studio_view():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    payload = _safe_get(f"/api/artist-studio/{user_id}", fallback=None)
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
+    payload, profile = await asyncio.gather(
+        _safe_get(f"/api/artist-studio/{user_id}", fallback=None),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+    )
+    profile = profile or {}
     edit_song = None
     edit_song_id_raw = request.args.get("edit_song_id")
     if edit_song_id_raw and profile.get("user_role") == "artist":
@@ -405,12 +451,12 @@ def artist_studio_view():
         except (TypeError, ValueError):
             edit_song_id = None
         if edit_song_id is not None:
-            edit_song = _safe_get(
+            edit_song = await _safe_get(
                 f"/api/artist-studio/song/{edit_song_id}",
                 params={"user_id": user_id},
                 fallback=None,
             )
-    if payload is None and profile.get("user_role") == "artist":
+    if payload is None:
         payload = {
             "artist": {
                 "artist_id": 0,
@@ -426,7 +472,7 @@ def artist_studio_view():
             "genres": [],
             "sale_price": 29.0,
         }
-    return render_template(
+    return await render_template(
         "artist_studio.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
@@ -437,12 +483,12 @@ def artist_studio_view():
 
 
 @app.route("/profile")
-def profile_view():
+async def profile_view():
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    return render_template(
+    profile = await _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
+    return await render_template(
         "profile.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
@@ -451,23 +497,29 @@ def profile_view():
 
 
 @app.route("/song/<int:song_id>")
-def song_view(song_id: int):
+async def song_view(song_id: int):
     user_id = _require_user_id()
     if user_id is None:
         return redirect(url_for("login"))
-    song = _safe_get(f"/api/songs/{song_id}", fallback={}) or {}
-    profile = _safe_get(f"/api/profile/{user_id}", fallback={}) or {}
-    liked_songs = _safe_get(f"/api/liked-songs/{user_id}", fallback=[]) or []
+    
+    song, profile, liked_songs = await asyncio.gather(
+        _safe_get(f"/api/songs/{song_id}", fallback={}),
+        _safe_get(f"/api/profile/{user_id}", fallback={}),
+        _safe_get(f"/api/liked-songs/{user_id}", fallback=[]),
+    )
+    song = song or {}
+    profile = profile or {}
+    liked_songs = liked_songs or []
     song["is_liked"] = any(str(s.get("song_id")) == str(song_id) for s in liked_songs)
     
     is_publisher = False
     if profile.get("user_role") == "artist":
-        artist_studio_data = _safe_get(f"/api/artist-studio/{user_id}", fallback={}) or {}
+        artist_studio_data = await _safe_get(f"/api/artist-studio/{user_id}", fallback={}) or {}
         artist_id = artist_studio_data.get("artist", {}).get("artist_id")
         if artist_id is not None and artist_id in song.get("artist_ids", []):
             is_publisher = True
 
-    return render_template(
+    return await render_template(
         "song.html",
         api_base_url=API_BASE_URL,
         user_id=user_id,
