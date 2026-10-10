@@ -89,14 +89,19 @@
       </form>
     </div>
     
-    <div class="mt-8 text-center text-sm text-secondary">
+    <div id="server-status-pill" class="mt-4 flex items-center justify-center gap-2 text-xs text-secondary">
+      <span class="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+      <span id="server-status-text">Connecting to backend...</span>
+    </div>
+
+    <div class="mt-6 text-center text-sm text-secondary">
       <p>Test accounts: u1@gmail.com, artist1@gmail.com</p>
       <p>Password: pw1, pw6</p>
     </div>
   </div>
 
   <script>
-    // Submit loading feedback
+    // 1. Submit loading feedback
     const form = document.querySelector('form');
     const submitBtn = document.getElementById('login-submit-btn');
     const btnText = document.getElementById('btn-text');
@@ -107,6 +112,31 @@
         btnText.innerHTML = '<i class="ri-loader-4-line animate-spin text-lg"></i> Logging in...';
       });
     }
+
+    // 2. Live backend status monitor
+    async function checkServerStatus() {
+      try {
+        const res = await fetch('/api/server-status');
+        const data = await res.json();
+        const pill = document.getElementById('server-status-pill');
+        if (pill) {
+          if (data.online) {
+            pill.innerHTML = '<span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span><span class="text-emerald-400 font-medium">Backend Online</span>';
+            return true;
+          } else {
+            pill.innerHTML = '<span class="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span><span class="text-amber-300">Waking up backend (Render cold start)...</span>';
+            return false;
+          }
+        }
+      } catch (e) {
+        return false;
+      }
+    }
+    const statusTimer = setInterval(async () => {
+      const online = await checkServerStatus();
+      if (online) clearInterval(statusTimer);
+    }, 4000);
+    checkServerStatus();
   </script>
 </body>
 </html>

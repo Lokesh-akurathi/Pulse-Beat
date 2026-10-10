@@ -67,14 +67,21 @@ async def _safe_get(path: str, params: Optional[dict] = None, fallback=None, tim
     return fallback
 
 
-async def _ping_backend_wakeup():
+async def _ping_backend_wakeup(max_wait_seconds: int = 70):
     print(f"[HEALTH-CHECK] Triggering background wake-up ping to {API_BASE_URL}/health ...")
     client = get_http_client()
-    try:
-        resp = await client.get(f"{API_BASE_URL}/health", timeout=60)
-        print(f"[HEALTH-CHECK] API server responded successfully: status={resp.status_code}")
-    except Exception as exc:
-        print(f"[HEALTH-CHECK] API ping note: {exc}")
+    start_time = asyncio.get_event_loop().time()
+    while (asyncio.get_event_loop().time() - start_time) < max_wait_seconds:
+        try:
+            resp = await client.get(f"{API_BASE_URL}/health", timeout=15)
+            if resp.status_code == 200:
+                print(f"[HEALTH-CHECK] API server is AWAKE and READY (status=200)!")
+                return
+            print(f"[HEALTH-CHECK] API server is booting (status={resp.status_code}). Polling again in 5s...")
+        except Exception as exc:
+            print(f"[HEALTH-CHECK] API connection pending: {exc}. Polling again in 5s...")
+        await asyncio.sleep(5)
+    print(f"[HEALTH-CHECK] Wake-up polling finished after {max_wait_seconds}s.")
 
 
 async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT, max_retries: int = 3):
@@ -118,6 +125,19 @@ async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int =
 @app.route("/")
 async def index():
     return redirect(url_for("login"))
+
+
+@app.route("/api/server-status")
+async def server_status():
+    """Allows UI JavaScript to check whether the API backend is ready."""
+    client = get_http_client()
+    try:
+        resp = await client.get(f"{API_BASE_URL}/health", timeout=3)
+        if resp.status_code == 200:
+            return {"online": True}
+    except Exception:
+        pass
+    return {"online": False}
 
 
 @app.route("/home")
