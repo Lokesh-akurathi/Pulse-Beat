@@ -80,8 +80,8 @@
              <input type="password" name="password" required placeholder="password" class="w-full bg-black border border-border rounded-xl pl-12 pr-4 py-3 focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent text-primary placeholder-muted transition-all">
           </div>
         </div>
-        <button type="submit" class="w-full py-3.5 rounded-xl bg-accent hover:bg-accent-hover text-white font-bold transition-all shadow-lg shadow-accent/25 mt-2">
-          Log In
+        <button id="login-submit-btn" type="submit" class="w-full py-3.5 rounded-xl bg-accent hover:bg-accent-hover text-white font-bold transition-all shadow-lg shadow-accent/25 mt-2 flex items-center justify-center gap-2">
+          <span id="btn-text">Log In</span>
         </button>
         <div class="text-center text-sm text-secondary mt-4">
           Don't have an account? <a href="{{ url_for('register') }}" class="text-accent hover:underline font-medium">Sign Up</a>
@@ -95,5 +95,24 @@
     </div>
   </div>
 
+  <script>
+    // 1. Pre-warm backend API server on page load (wakes Render free tier if asleep)
+    const apiBaseUrl = "{{ api_base_url }}";
+    if (apiBaseUrl && apiBaseUrl.startsWith("http")) {
+      fetch(`${apiBaseUrl}/health`, { mode: 'no-cors' }).catch(() => {});
+    }
+
+    // 2. Submit loading feedback
+    const form = document.querySelector('form');
+    const submitBtn = document.getElementById('login-submit-btn');
+    const btnText = document.getElementById('btn-text');
+    if (form && submitBtn) {
+      form.addEventListener('submit', () => {
+        submitBtn.disabled = true;
+        submitBtn.classList.add('opacity-80', 'cursor-not-allowed');
+        btnText.innerHTML = '<i class="ri-loader-4-line animate-spin text-lg"></i> Logging in...';
+      });
+    }
+  </script>
 </body>
 </html>

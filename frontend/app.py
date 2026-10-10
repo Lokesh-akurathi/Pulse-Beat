@@ -15,7 +15,7 @@ app = Quart(
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key")
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-API_TIMEOUT = int(os.getenv("API_TIMEOUT", "15"))
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "60"))
 DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 
 # Shared persistent asynchronous HTTP client for connection pooling and high throughput
@@ -26,7 +26,7 @@ def get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
         _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(API_TIMEOUT),
+            timeout=httpx.Timeout(API_TIMEOUT, connect=30.0),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
         )
     return _http_client
@@ -80,15 +80,18 @@ async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int =
         response = await client.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=timeout)
         if response.is_success:
             return response.json(), None
+        # Handle Render free-tier cold start gateway responses (502 Bad Gateway / 503 / 504)
+        if response.status_code in (502, 503, 504):
+            return None, "Backend service is waking up from sleep (Render cold start). Please wait ~30 seconds and try again."
         try:
-            detail = response.json().get("detail", "Request failed")
+            detail = response.json().get("detail", f"Request failed (HTTP {response.status_code})")
         except Exception:
-            detail = "Request failed"
+            detail = f"Request failed (HTTP {response.status_code})"
         return None, detail
     except httpx.TimeoutException:
-        return None, "Request timed out. Please try again."
+        return None, "Backend request timed out. The server is likely waking up from sleep; please try again in a few moments."
     except httpx.HTTPError:
-        return None, "Unable to connect to the backend authentication service"
+        return None, "Unable to connect to the backend authentication service. Please verify the API server is reachable."
 
 
 @app.route("/")
@@ -162,7 +165,7 @@ async def login():
             session["access_token"] = auth_response["access_token"]
             return redirect(url_for("home"))
 
-    return await render_template("login.html", error=error, success=success)
+    return await render_template("login.html", error=error, success=success, api_base_url=API_BASE_URL)
 
 
 @app.route("/register", methods=["GET", "POST"])
@@ -195,7 +198,7 @@ async def register():
             if reg_response:
                 return redirect(url_for("login", registered="success"))
 
-    return await render_template("register.html", error=error)
+    return await render_template("register.html", error=error, api_base_url=API_BASE_URL)
 
 
 @app.route("/logout")

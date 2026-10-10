@@ -29,6 +29,11 @@ def verify_database_connection():
         print(f"[DB] Startup check failed: {exc}")
 
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "PulseBeat API is running"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
