@@ -67,10 +67,20 @@ async def _safe_get(path: str, params: Optional[dict] = None, fallback=None, tim
     return fallback
 
 
-async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT, max_retries: int = 2):
+async def _ping_backend_wakeup():
+    print(f"[HEALTH-CHECK] Triggering background wake-up ping to {API_BASE_URL}/health ...")
+    client = get_http_client()
+    try:
+        resp = await client.get(f"{API_BASE_URL}/health", timeout=60)
+        print(f"[HEALTH-CHECK] API server responded successfully: status={resp.status_code}")
+    except Exception as exc:
+        print(f"[HEALTH-CHECK] API ping note: {exc}")
+
+
+async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT, max_retries: int = 3):
     """
     Execute an asynchronous POST request against the backend API.
-    Retries once or twice if encountering Render cold-start gateway errors (502/503/504).
+    Retries if encountering Render cold-start gateway errors (502/503/504).
     Returns: (data, error_message)
     """
     client = get_http_client()
@@ -86,9 +96,10 @@ async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int =
             # If Render free instance is cold-starting, pause and retry before failing
             if response.status_code in (502, 503, 504):
                 if attempt < max_retries:
-                    await asyncio.sleep(4)
+                    print(f"[SAFE-POST] Render gateway returned {response.status_code} (booting up). Attempt {attempt + 1}/{max_retries + 1}. Retrying in 5s...")
+                    await asyncio.sleep(5)
                     continue
-                return None, "Backend service is waking up from sleep . Please wait ~15 seconds and try again."
+                return None, "Backend service is waking up from sleep. Please wait ~15 seconds and try again."
             try:
                 detail = response.json().get("detail", f"Request failed (HTTP {response.status_code})")
             except Exception:
@@ -96,10 +107,11 @@ async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int =
             return None, detail
         except httpx.TimeoutException:
             if attempt < max_retries:
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 continue
             return None, "Backend request timed out. The server is likely waking up from sleep; please try again in a few moments."
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            print(f"[SAFE-POST] Connection error to backend: {exc}")
             return None, "Unable to connect to the backend authentication service - Please try again in sometime."
 
 
@@ -163,8 +175,8 @@ async def login():
         success = "Registration successful! Please log in with your new credentials."
 
     if request.method == "GET":
-        # Proactively trigger backend wake-up in background (does not block page rendering)
-        asyncio.create_task(_safe_get("/health", timeout=60))
+        # Proactively trigger backend wake-up in background with explicit logging
+        asyncio.create_task(_ping_backend_wakeup())
 
     if request.method == "POST":
         form = await request.form
@@ -188,8 +200,8 @@ async def register():
 
     error = None
     if request.method == "GET":
-        # Proactively trigger backend wake-up in background (does not block page rendering)
-        asyncio.create_task(_safe_get("/health", timeout=60))
+        # Proactively trigger backend wake-up in background with explicit logging
+        asyncio.create_task(_ping_backend_wakeup())
 
     if request.method == "POST":
         form = await request.form
