@@ -113,6 +113,10 @@
     <div class="mt-8 text-center text-sm text-secondary">
       <p>Already have an account? <a href="{{ url_for('login') }}" class="text-accent hover:underline font-medium">Log In</a></p>
     </div>
+        <!-- Direct browser wake-up trigger from user's connection -->
+    <img src="{{ api_base_url }}/health" style="display:none;" onerror="this.remove()" alt="" />
+  </div>
+
   </div>
 
   <script>

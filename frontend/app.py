@@ -26,6 +26,10 @@ def get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None or _http_client.is_closed:
         _http_client = httpx.AsyncClient(
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "*/*",
+            },
             timeout=httpx.Timeout(API_TIMEOUT, connect=30.0),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
         )

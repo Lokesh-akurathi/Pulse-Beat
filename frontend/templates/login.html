@@ -98,6 +98,9 @@
       <p>Test accounts: u1@gmail.com, artist1@gmail.com</p>
       <p>Password: pw1, pw6</p>
     </div>
+
+    <!-- Direct browser wake-up trigger from user's connection -->
+    <img src="{{ api_base_url }}/health" style="display:none;" onerror="this.remove()" alt="" />
   </div>
 
   <script>
