@@ -116,13 +116,7 @@
   </div>
 
   <script>
-    // 1. Pre-warm backend API server on page load
-    const apiBaseUrl = "{{ api_base_url }}";
-    if (apiBaseUrl && apiBaseUrl.startsWith("http")) {
-      fetch(`${apiBaseUrl}/health`, { mode: 'no-cors' }).catch(() => {});
-    }
-
-    // 2. Role toggle
+    // 1. Role toggle
     document.getElementById('role').addEventListener('change', function() {
       const nationalityContainer = document.getElementById('nationality-container');
       const nationalityInput = document.getElementById('nationality');

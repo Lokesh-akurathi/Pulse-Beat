@@ -96,13 +96,7 @@
   </div>
 
   <script>
-    // 1. Pre-warm backend API server on page load (wakes Render free tier if asleep)
-    const apiBaseUrl = "{{ api_base_url }}";
-    if (apiBaseUrl && apiBaseUrl.startsWith("http")) {
-      fetch(`${apiBaseUrl}/health`, { mode: 'no-cors' }).catch(() => {});
-    }
-
-    // 2. Submit loading feedback
+    // Submit loading feedback
     const form = document.querySelector('form');
     const submitBtn = document.getElementById('login-submit-btn');
     const btnText = document.getElementById('btn-text');

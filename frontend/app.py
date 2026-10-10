@@ -67,31 +67,40 @@ async def _safe_get(path: str, params: Optional[dict] = None, fallback=None, tim
     return fallback
 
 
-async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT):
+async def _safe_post(path: str, json_data: Optional[dict] = None, timeout: int = API_TIMEOUT, max_retries: int = 2):
     """
     Execute an asynchronous POST request against the backend API.
+    Retries once or twice if encountering Render cold-start gateway errors (502/503/504).
     Returns: (data, error_message)
     """
     client = get_http_client()
     headers = {}
     if "access_token" in session:
         headers["Authorization"] = f"Bearer {session['access_token']}"
-    try:
-        response = await client.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=timeout)
-        if response.is_success:
-            return response.json(), None
-        # Handle Render free-tier cold start gateway responses (502 Bad Gateway / 503 / 504)
-        if response.status_code in (502, 503, 504):
-            return None, "Backend service is waking up from sleep (Render cold start). Please wait ~30 seconds and try again."
+    
+    for attempt in range(max_retries + 1):
         try:
-            detail = response.json().get("detail", f"Request failed (HTTP {response.status_code})")
-        except Exception:
-            detail = f"Request failed (HTTP {response.status_code})"
-        return None, detail
-    except httpx.TimeoutException:
-        return None, "Backend request timed out. The server is likely waking up from sleep; please try again in a few moments."
-    except httpx.HTTPError:
-        return None, "Unable to connect to the backend authentication service. Please verify the API server is reachable."
+            response = await client.post(f"{API_BASE_URL}{path}", json=json_data, headers=headers, timeout=timeout)
+            if response.is_success:
+                return response.json(), None
+            # If Render free instance is cold-starting, pause and retry before failing
+            if response.status_code in (502, 503, 504):
+                if attempt < max_retries:
+                    await asyncio.sleep(4)
+                    continue
+                return None, "Backend service is waking up from sleep . Please wait ~15 seconds and try again."
+            try:
+                detail = response.json().get("detail", f"Request failed (HTTP {response.status_code})")
+            except Exception:
+                detail = f"Request failed (HTTP {response.status_code})"
+            return None, detail
+        except httpx.TimeoutException:
+            if attempt < max_retries:
+                await asyncio.sleep(2)
+                continue
+            return None, "Backend request timed out. The server is likely waking up from sleep; please try again in a few moments."
+        except httpx.HTTPError:
+            return None, "Unable to connect to the backend authentication service - Please try again in sometime."
 
 
 @app.route("/")
@@ -153,6 +162,10 @@ async def login():
     if request.args.get("registered") == "success":
         success = "Registration successful! Please log in with your new credentials."
 
+    if request.method == "GET":
+        # Proactively trigger backend wake-up in background (does not block page rendering)
+        asyncio.create_task(_safe_get("/health", timeout=60))
+
     if request.method == "POST":
         form = await request.form
         email = form.get("email", "").strip()
@@ -174,6 +187,10 @@ async def register():
         return redirect(url_for("home"))
 
     error = None
+    if request.method == "GET":
+        # Proactively trigger backend wake-up in background (does not block page rendering)
+        asyncio.create_task(_safe_get("/health", timeout=60))
+
     if request.method == "POST":
         form = await request.form
         name = form.get("name", "").strip()
